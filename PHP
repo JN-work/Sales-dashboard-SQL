@@ -1,0 +1,134 @@
+try {
+    $pdo = new PDO("pgsql:host=$host;port=5432;dbname=$db", $user, $pass);
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(['error' => 'DB connection failed']);
+    exit;
+}
+
+$query = $_GET['query'] ?? '';
+
+$queries = [
+
+    'top_reps' => "
+        SELECT sales_agent, ROUND(SUM(close_value), 0) AS total_revenue
+        FROM sales_pipeline
+        WHERE deal_stage = 'Won'
+        GROUP BY sales_agent
+        ORDER BY total_revenue DESC
+        LIMIT 10
+    ",
+
+    'revenue_by_product' => "
+        SELECT
+            product,
+            COUNT(*) AS deals_won,
+            ROUND(SUM(close_value), 0) AS total_revenue,
+            ROUND(AVG(close_value), 0) AS avg_deal_size
+        FROM sales_pipeline
+        WHERE deal_stage = 'Won'
+        GROUP BY product
+        ORDER BY deals_won DESC
+    ",
+
+    'team_performance' => "
+        WITH rep_revenue AS (
+            SELECT sales_agent, ROUND(SUM(close_value), 0) AS total_revenue
+            FROM sales_pipeline
+            WHERE deal_stage = 'Won'
+            GROUP BY sales_agent
+        )
+        SELECT st.manager, st.regional_office,
+               ROUND(SUM(rr.total_revenue), 0) AS team_revenue
+        FROM sales_teams st
+        JOIN rep_revenue rr ON st.sales_agent = rr.sales_agent
+        GROUP BY st.manager, st.regional_office
+        ORDER BY team_revenue DESC
+    ",
+
+    'win_rates' => "
+        SELECT sales_agent,
+               ROUND(SUM(CASE WHEN deal_stage = 'Won' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS win_rate
+        FROM sales_pipeline
+        WHERE deal_stage IN ('Won', 'Lost')
+        GROUP BY sales_agent
+        ORDER BY win_rate DESC
+        LIMIT 10
+    ",
+
+    'win_rates_all' => "
+        SELECT sales_agent,
+               ROUND(SUM(CASE WHEN deal_stage = 'Won' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS win_rate
+        FROM sales_pipeline
+        WHERE deal_stage IN ('Won', 'Lost')
+        GROUP BY sales_agent
+        ORDER BY win_rate DESC
+    ",
+
+    'quartile_winrate' => "
+        WITH rep_stats AS (
+            SELECT 
+                sp.sales_agent,
+                st.manager,
+                ROUND(SUM(CASE WHEN sp.deal_stage = 'Won' THEN 1 ELSE 0 END) * 100.0 / 
+                      COUNT(*), 1) AS win_rate,
+                NTILE(4) OVER (ORDER BY 
+                    SUM(CASE WHEN sp.deal_stage = 'Won' THEN 1 ELSE 0 END) * 100.0 / 
+                    COUNT(*) DESC) AS quartile
+            FROM sales_pipeline sp
+            JOIN sales_teams st ON sp.sales_agent = st.sales_agent
+            WHERE sp.deal_stage IN ('Won', 'Lost')
+            GROUP BY sp.sales_agent, st.manager
+            HAVING COUNT(*) >= 10
+        )
+        SELECT sales_agent, manager, win_rate, quartile
+        FROM rep_stats
+        WHERE quartile IN (1, 4)
+        ORDER BY quartile, win_rate DESC
+    ",
+
+    'quartile_revenue' => "
+        WITH rep_stats AS (
+            SELECT 
+                sp.sales_agent,
+                st.manager,
+                ROUND(SUM(sp.close_value), 0) AS total_revenue,
+                NTILE(4) OVER (ORDER BY SUM(sp.close_value) DESC) AS quartile
+            FROM sales_pipeline sp
+            JOIN sales_teams st ON sp.sales_agent = st.sales_agent
+            WHERE sp.deal_stage = 'Won'
+            GROUP BY sp.sales_agent, st.manager
+        )
+        SELECT sales_agent, manager, total_revenue, quartile
+        FROM rep_stats
+        WHERE quartile IN (1, 4)
+        ORDER BY quartile, total_revenue DESC
+    ",
+
+    'funnel' => "
+        SELECT
+            deal_stage,
+            COUNT(*) AS opp_count,
+            COALESCE(ROUND(SUM(close_value), 0), 0) AS total_value
+        FROM sales_pipeline
+        GROUP BY deal_stage
+        ORDER BY
+            CASE deal_stage
+                WHEN 'Prospecting' THEN 1
+                WHEN 'Engaging'    THEN 2
+                WHEN 'Won'         THEN 3
+                WHEN 'Lost'        THEN 4
+            END
+    "
+
+];
+
+if (!array_key_exists($query, $queries)) {
+    http_response_code(400);
+    echo json_encode(['error' => 'Invalid query']);
+    exit;
+}
+
+$stmt = $pdo->query($queries[$query]);
+echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC));
